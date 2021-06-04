@@ -1,0 +1,285 @@
+version: 2.1
+executors:
+  node-executor:
+    docker:
+      - image: circleci/node:12
+  docker-publisher:
+    docker:
+      - image: circleci/buildpack-deps:stretch
+
+parameters:
+  deploy:
+    type: boolean
+    default: false #  If not present, the parameter is implied to be require
+  IMAGE_TAG:
+    type: string
+    default: "latest"
+
+orbs:
+  aws-cli: circleci/aws-cli@1.2.1
+  aws-eks: circleci/aws-eks@0.2.6
+  kubernetes: circleci/kubernetes@0.11.0
+  snyk: snyk/snyk@0.0.10
+
+jobs:
+  prepare:
+    executor: node-executor
+    steps:
+      - checkout
+      - run:
+          name: Set i18n package key
+          command: npm config set '//registry.npmjs.org/:_authToken' $NPM_TOKEN
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "package.json" }}
+            - v1-
+      - run:
+          name: Install dependencies
+          command: npm i
+      - snyk/scan:
+          fail-on-issues: false
+          severity-threshold: high
+      - save_cache:
+          paths:
+            - node_modules
+          key: v1-dependencies-{{ checksum "package.json" }}
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - project
+  lint:
+    executor: node-executor
+    steps:
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Lint
+          command: npm run lint
+  semantic-release:
+    executor: node-executor
+    steps:
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Update package.json version, Git tag, and CHANGELOG in release branch
+          command: |
+            if [[ $CIRCLE_BRANCH != "dev" ]]
+            then
+              npm run semantic-release || true
+            fi
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - project
+  build:
+    executor: docker-publisher
+    steps:
+      - attach_workspace:
+          at: ~/
+      - setup_remote_docker
+      - run:
+          name: Build image
+          command: |
+            if [ ! -f .env ]; then
+              PACKAGE_VERSION=$(cat package.json \
+                | grep version \
+                | head -1 \
+                | awk -F: '{print$2}' \
+                | sed 's/[",]//g' \
+                | sed 's/ //g'
+              )
+              echo "NEXT_VERSION=${PACKAGE_VERSION}" > .env
+            fi
+            if [[ $CIRCLE_BRANCH = "dev" ]]
+            then
+              IMAGE_TAG=${CIRCLE_BUILD_NUM}-${CIRCLE_BRANCH}
+            else
+              IMAGE_TAG=$(grep ^NEXT_VERSION .env | cut -d '=' -f 2)-${CIRCLE_BUILD_NUM}-${CIRCLE_BRANCH}
+            fi
+            echo "IMAGE_TAG=$IMAGE_TAG" > .env
+            echo "export IMAGE_TAG=$IMAGE_TAG" >> "$BASH_ENV"
+            docker build \
+              --build-arg DEPLOYMENT_ENV=$CIRCLE_BRANCH \
+              --build-arg NPM_TOKEN=$NPM_TOKEN \
+              -t $IMAGE_NAME:$CIRCLE_BRANCH-latest -t $IMAGE_NAME:$IMAGE_TAG .
+      - snyk/scan:
+          docker-image-name: "$IMAGE_NAME:$IMAGE_TAG"
+          fail-on-issues: false
+          severity-threshold: high
+          target-file: Dockerfile
+      - run:
+          name: Archive Docker image
+          command: docker save -o image.tar $IMAGE_NAME
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - project
+  push:
+    executor: docker-publisher
+    steps:
+      - attach_workspace:
+          at: ~/
+      - setup_remote_docker
+      - run:
+          name: Load archived Docker image
+          command: docker load -i image.tar
+      - run:
+          name: Login Docker
+          command: echo "$DOCKER_PWD" | docker login -u "$DOCKER_LOGIN" --password-stdin
+      - run:
+          name: Push image to Docker Hub
+          command: docker push $IMAGE_NAME
+  trigger-deployment:
+    executor: node-executor
+    environment:
+    steps:
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: call deploy
+          command: |
+            IMAGE_TAG=$(grep ^IMAGE_TAG .env | cut -d '=' -f 2)
+            API_TOKEN=${CIRCLECI_API_TOKEN}:
+            curl \
+              -u "$API_TOKEN"  \
+              -X POST --header "Content-type: application/json"  \
+              -d '{"branch": "'"${CIRCLE_BRANCH}"'", "parameters": {"deploy": true, "IMAGE_TAG": "'"${IMAGE_TAG}"'"}}'  \
+              https://circleci.com/api/v2/project/gh/Pisolutions-consultant/pi-api/pipeline
+
+          # #ref: https://github.com/CircleCI-Public/api-preview-docs/blob/master/docs/conditional-workflows.md
+  check:
+    executor: node-executor
+    environment:
+      IMAGE_TAG: << pipeline.parameters.IMAGE_TAG >>
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: check IMAGE_TAG then setup to environment variable
+          command: |
+            if [[ $IMAGE_TAG == "latest" ]]
+            then
+              IMAGE_TAG="${CIRCLE_BRANCH}-latest"
+            fi
+            echo "IMAGE_TAG=$IMAGE_TAG" > .env
+            echo "export IMAGE_TAG=$IMAGE_TAG" >> "$BASH_ENV"
+      - persist_to_workspace:
+          root: ~/
+          paths:
+            - project
+  migrate:
+    executor: node-executor
+    steps:
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Migration
+          command: |
+            export DB_NAME=$CIRCLE_BRANCH
+            npm run migrate
+  
+  syncBucket:
+    executor: node-executor
+    steps:
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Sync buckets in AWS S3
+          command: |
+            export DEPLOYMENT_ENV=$CIRCLE_BRANCH
+            npx babel-node src/bin/syncBuckets.js
+  deploy:
+    executor: aws-eks/python3
+    steps:
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Map branch to cluster name
+          command: |
+            if [[ $CIRCLE_BRANCH = "mcl" ]]
+            then
+              CLUSTER_NAME=$TEST_CLUSTER
+            else
+              CLUSTER_NAME=$DEV_CLUSTER
+            fi
+            echo "export CLUSTER_NAME=$CLUSTER_NAME" >> "$BASH_ENV"
+      - aws-eks/update-kubeconfig-with-authenticator:
+          cluster-name: $CLUSTER_NAME
+          install-kubectl: true
+      - run:
+          name: Deploy image to Kubernetes cluster
+          command: |
+            kubectl config set-context --current --namespace=$CIRCLE_BRANCH
+            IMAGE_TAG=$(grep ^IMAGE_TAG .env | cut -d '=' -f 2)
+            echo "Updating image to $IMAGE_TAG."
+            kubectl set image deployment/api api=$IMAGE_NAME:$IMAGE_TAG
+
+workflows:
+  version: 2
+  build_test_push:
+    when:
+      not: << pipeline.parameters.deploy >>
+    jobs:
+      - prepare:
+          context: .env
+          filters:
+            branches:
+              only:
+                - dev
+                - staging
+                - master
+                - vp
+                - mcl
+                - zylux
+                - optivtech
+                - aisp
+                - mscf
+                - hupao
+                - demo
+      - lint:
+          requires:
+            - prepare
+      - semantic-release:
+          requires:
+            - lint
+      - build:
+          context: .env
+          requires:
+            - semantic-release
+      - push:
+          context: .env
+          requires:
+            - build
+      - trigger-deployment:
+          context: .env
+          filters:
+            branches:
+              only:
+                - dev
+                - staging
+                - master
+          requires:
+            - push
+
+  deploy:
+    when: << pipeline.parameters.deploy >>
+    jobs:
+      - prepare:
+          context: .env
+      - check:
+          context: .env
+          requires:
+            - prepare
+      - migrate:
+          context: .env
+          requires:
+            - check
+      - syncBucket:
+          context: .env
+          requires:
+            - check
+      - deploy:
+          context: .env
+          requires:
+            - syncBucket

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+public/images/emp/\
+!public/images/emp/default.png
+.vscode/
+.DS_Store
+.env
+npm-debug.log
+vim.exe.stackdump
+.jsbeautifyrc
+dump.rdb

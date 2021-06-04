@@ -1,0 +1,57 @@
+{
+  "name": "srTest",
+  "version": "0.0.0",
+  "updateDate": "2021-06-04",
+  "private": true,
+  "scripts": {
+    "babel-node": "babel-node --presets=latest",
+    "build": "babel src --out-dir dist",
+    "api": "nodemon src/bin/www.js --exec \"babel-node\"",
+    "migrate": "sequelize db:migrate",
+    "migrate:undo": "sequelize db:migrate:undo",
+    "migrate:create": "sequelize migration:create --name",
+    "seeder": "sequelize db:seed:all",
+    "seeder:undo": "sequelize db:seed:undo:all"
+  },
+  "dependencies": {
+    "express": "^4.17.1",
+    "helmet": "^4.4.1",
+    "morgan": "^1.10.0",
+    "nodemailer": "^6.4.11",
+    "moment-timezone": "^0.5.31",
+    "jsonwebtoken": "^8.5.1",
+    "mysql": "^2.18.1",
+    "mysql2": "^2.2.5",
+    "moment": "^2.27.0",
+    "dotenv": "^8.2.0",
+    "crypto-js": "^4.0.0",
+    "sequelize": "^6.5.0",
+    "sequelize-cli": "^6.2.0",
+    "winston": "^3.3.3"
+  },
+  "devDependencies": {
+    "@babel/cli": "^7.10.4",
+    "@babel/core": "^7.10.4",
+    "@babel/node": "^7.10.4",
+    "@babel/plugin-transform-runtime": "^7.10.4",
+    "@babel/polyfill": "^7.10.4",
+    "@babel/preset-env": "^7.10.4",
+    "@babel/register": "^7.10.4",
+    "@semantic-release/changelog": "^5.0.1",
+    "@semantic-release/git": "^9.0.0",
+    "babel-eslint": "^10.1.0",
+    "babel-plugin-module-resolver": "^4.0.0",
+    "eslint": "^7.4.0",
+    "eslint-config-google": "^0.14.0",
+    "eslint-import-resolver-babel-module": "^5.1.2",
+    "eslint-plugin-import": "^2.22.0",
+    "eslint-plugin-sql": "^1.1.1",
+    "semantic-release": "^17.4.3"
+  },
+  "bundledDependencies": [
+    "jsonwebtoken",
+    "crypto-js",
+    "moment",
+    "dotenv"
+  ]
+}
